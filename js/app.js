@@ -1,22 +1,66 @@
 // ============================================================================
-// GUESS THE MODEL — app logic (vanilla SPA, hash-routed)
+// GUESS THE MODEL — "The Lineup"
+// Vanilla SPA. Architecture: a tiny DOM builder (el) with mount-once,
+// patch-in-place updates. The game <iframe> is created ONCE per play session
+// and reused — rating a game or switching tabs never rebuilds it, so the game
+// never reloads out from under you.
 // ============================================================================
 
 (() => {
   'use strict';
 
-  const DATA = window.GTM_DATA || { challenges: [] };
-  const APP  = document.getElementById('app');
+  const DATA = window.GTM_DATA || { challenges: [], models: [] };
+  const APP = document.getElementById('app');
   const TOAST = document.getElementById('toast');
-
-  const STORE_KEY = 'gtm_state_v1';
+  const LETTERS = 'ABCDEFGHIJKL'.split('');
 
   // --------------------------------------------------------------------------
-  // Utilities
+  // DOM builder
+  //   el('div.card#id', {onClick, style:{}, dataset:{}, text|html, ...attrs}, ...kids)
   // --------------------------------------------------------------------------
 
-  const $  = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  function el(sel, props, ...kids) {
+    if (props != null && (typeof props !== 'object' || props.nodeType || Array.isArray(props))) {
+      kids = [props, ...kids];
+      props = {};
+    }
+    props = props || {};
+    const tag = (sel.match(/^([a-z0-9]+)/i) || [, 'div'])[1];
+    const node = document.createElement(tag);
+    const id = sel.match(/#([\w-]+)/);
+    if (id) node.id = id[1];
+    const cls = (sel.match(/\.([\w-]+)/g) || []).map(s => s.slice(1));
+    if (cls.length) node.className = cls.join(' ');
+
+    for (const [k, v] of Object.entries(props)) {
+      if (v == null || v === false) continue;
+      if (k === 'text') node.textContent = v;
+      else if (k === 'html') node.innerHTML = v;
+      else if (k === 'class') node.className += (node.className ? ' ' : '') + v;
+      else if (k === 'style' && typeof v === 'object') Object.assign(node.style, v);
+      else if (k === 'dataset') Object.assign(node.dataset, v);
+      else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+      else node.setAttribute(k, v === true ? '' : v);
+    }
+    appendKids(node, kids);
+    return node;
+  }
+
+  function appendKids(node, kids) {
+    for (const kid of kids.flat(Infinity)) {
+      if (kid == null || kid === false) continue;
+      node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+  }
+
+  function mount(...nodes) {
+    APP.replaceChildren(...nodes.flat(Infinity).filter(Boolean));
+    window.scrollTo(0, 0);
+  }
+
+  // --------------------------------------------------------------------------
+  // Small utilities
+  // --------------------------------------------------------------------------
 
   function shuffle(arr) {
     const a = arr.slice();
@@ -27,12 +71,11 @@
     return a;
   }
 
-  const LETTERS = 'ABCDEFGHIJ'.split('');
-
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  function byId(cid) {
+    return DATA.challenges.find(c => c.id === cid) || null;
+  }
+  function entryById(challenge, eid) {
+    return challenge.entries.find(e => e.id === eid) || null;
   }
 
   let toastTimer = null;
@@ -40,101 +83,10 @@
     TOAST.textContent = msg;
     TOAST.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => TOAST.classList.remove('show'), 2400);
+    toastTimer = setTimeout(() => TOAST.classList.remove('show'), 2600);
   }
 
-  function byId(id) {
-    return DATA.challenges.find(c => c.id === id) || null;
-  }
-
-  // --------------------------------------------------------------------------
-  // Persistence
-  // --------------------------------------------------------------------------
-
-  function loadStore() {
-    try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }
-    catch { return {}; }
-  }
-  function saveStore(s) {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch {}
-  }
-
-  function getBest(challengeId) {
-    const s = loadStore();
-    return (s.best && s.best[challengeId]) || null; // {score, total}
-  }
-  function recordResult(challengeId, score, total) {
-    const s = loadStore();
-    if (!s.best) s.best = {};
-    const prev = s.best[challengeId];
-    if (!prev || score > prev.score || (score === prev.score && total > prev.total)) {
-      s.best[challengeId] = { score, total, when: Date.now() };
-    }
-    if (!s.plays) s.plays = [];
-    s.plays.push({ id: challengeId, score, total, when: Date.now() });
-    s.plays = s.plays.slice(-50);
-    saveStore(s);
-  }
-
-  // Full snapshot of the most recent revealed round, so a result can be
-  // re-opened later (even after a reload) instead of vanishing.
-  function saveLastResult(challengeId) {
-    if (!SESSION || !SESSION.result) return;
-    const s = loadStore();
-    if (!s.last) s.last = {};
-    s.last[challengeId] = {
-      when: Date.now(),
-      score: SESSION.result.score,
-      total: SESSION.result.total,
-      slots: SESSION.slots.map(sl => ({
-        letter: sl.letter,
-        id: sl.entry.id,
-        model: sl.entry.model,
-        file: sl.entry.file,
-        rating: sl.rating,
-        guess: SESSION.guesses[sl.letter] || '',
-      })),
-    };
-    saveStore(s);
-  }
-  function getLast(challengeId) {
-    const s = loadStore();
-    return (s.last && s.last[challengeId]) || null;
-  }
-
-  function totalPlays() {
-    const s = loadStore();
-    return (s.plays || []).length;
-  }
-  function totalCorrect() {
-    const s = loadStore();
-    return (s.plays || []).reduce((n, p) => n + (p.score || 0), 0);
-  }
-
-  // --------------------------------------------------------------------------
-  // Routing
-  // --------------------------------------------------------------------------
-
-  function route() {
-    const h = location.hash.replace(/^#/, '') || '/';
-    const parts = h.split('/').filter(Boolean); // e.g. ['c','ultrakill-clone']
-
-    setAccent(null); // reset to default each render; view can override
-
-    if (parts.length === 0)              return renderHome();
-    if (parts[0] === 'c' && parts[1])    return renderSession(parts[1], parts[2] || 'brief');
-    renderHome();
-  }
-
-  function go(hash) {
-    location.hash = hash;
-  }
-
-  window.addEventListener('hashchange', () => { route(); window.scrollTo(0,0); });
-
-  // --------------------------------------------------------------------------
-  // Accent theming
-  // --------------------------------------------------------------------------
+  function go(hash) { location.hash = hash; }
 
   function setAccent(challenge) {
     const root = document.documentElement;
@@ -148,679 +100,636 @@
   }
 
   // --------------------------------------------------------------------------
-  // Top bar
+  // Persistence  (single namespaced object)
   // --------------------------------------------------------------------------
 
+  const KEY = 'gtm_v3';
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
+  const save = (s) => { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {} };
+
+  function saveProgress(session) {
+    const s = load();
+    s.progress = s.progress || {};
+    s.progress[session.challenge.id] = {
+      order: session.order, active: session.active,
+      ratings: session.ratings, guesses: session.guesses, phase: session.phase,
+    };
+    save(s);
+  }
+  function loadProgress(cid) { const s = load(); return (s.progress && s.progress[cid]) || null; }
+  function clearProgress(cid) { const s = load(); if (s.progress) delete s.progress[cid]; save(s); }
+
+  function saveResult(session) {
+    const s = load();
+    s.results = s.results || {};
+    s.results[session.challenge.id] = {
+      when: nowSafe(), score: session.result.score, total: session.result.total,
+      order: session.order, ratings: session.ratings, guesses: session.guesses,
+    };
+    s.stats = s.stats || { plays: 0, correct: 0 };
+    s.stats.plays += 1;
+    s.stats.correct += session.result.score;
+    s.best = s.best || {};
+    const prev = s.best[session.challenge.id];
+    if (!prev || session.result.score > prev.score)
+      s.best[session.challenge.id] = { score: session.result.score, total: session.result.total };
+    save(s);
+  }
+  function loadResult(cid) { const s = load(); return (s.results && s.results[cid]) || null; }
+  function getBest(cid) { const s = load(); return (s.best && s.best[cid]) || null; }
+  function getStats() { const s = load(); return s.stats || { plays: 0, correct: 0 }; }
+  function nowSafe() { try { return Date.now(); } catch { return 0; } }
+
+  // --------------------------------------------------------------------------
+  // Session model
+  // --------------------------------------------------------------------------
+
+  function newSession(challenge) {
+    return {
+      challenge,
+      order: shuffle(challenge.entries.map(e => e.id)), // index -> letter
+      active: 0,
+      ratings: {},   // entryId -> 0..5
+      guesses: {},   // letter  -> model name
+      phase: 'brief',
+      result: null,
+    };
+  }
+  function reviveSession(challenge, saved) {
+    return {
+      challenge,
+      order: saved.order.filter(id => entryById(challenge, id)),
+      active: Math.min(saved.active || 0, saved.order.length - 1),
+      ratings: saved.ratings || {},
+      guesses: saved.guesses || {},
+      phase: saved.phase || 'brief',
+      result: null,
+    };
+  }
+
+  function rosterModels() {
+    const roster = Array.isArray(DATA.models) ? DATA.models : [];
+    const used = DATA.challenges.flatMap(c => c.entries.map(e => e.model));
+    return Array.from(new Set([...roster, ...used]));
+  }
+
+  function computeReveal(challenge, order, guesses, ratings) {
+    let score = 0;
+    const rows = order.map((eid, i) => {
+      const letter = LETTERS[i];
+      const entry = entryById(challenge, eid);
+      const guess = guesses[letter] || '';
+      const correct = guess === entry.model;
+      if (correct) score++;
+      return { letter, actual: entry.model, guess, correct, rating: ratings[eid] || 0, file: entry.file };
+    });
+    return { score, total: order.length, rows };
+  }
+
+  // ==========================================================================
+  // Chrome
+  // ==========================================================================
+
   function topbar() {
-    return `
-      <header class="topbar">
-        <div class="wrap topbar-inner">
-          <a class="brand" href="#/" data-link>
-            <span class="brand-mark">?</span>
-            <span>Guess&nbsp;the&nbsp;Model <small>blind AI arena</small></span>
-          </a>
-          <div class="topbar-spacer"></div>
-        </div>
-      </header>`;
+    return el('header.topbar',
+      el('div.wrap.topbar-inner',
+        el('a.brand', { href: '#/' },
+          el('span.brand-seal', el('span.brand-q', '?')),
+          el('span.brand-text',
+            el('b', 'Guess the Model'),
+            el('small', 'a blind AI lineup'))),
+        el('span.topbar-spacer'),
+        el('a.topbar-link', { href: '#/', text: 'The arena' })));
   }
 
   function footer() {
-    return `
-      <div class="wrap">
-        <div class="footer">
-          <span>Guess the Model — a blind comparison arena for AI-built games.</span>
-          <span>Answers live in your browser. No data leaves this page.</span>
-        </div>
-      </div>`;
+    return el('footer.footer-wrap',
+      el('div.wrap.footer',
+        el('span', 'Guess the Model — same prompt, different models, sealed until you call it.'),
+        el('span.footer-note', 'Everything stays in your browser. Nothing is uploaded.')));
   }
 
-  // --------------------------------------------------------------------------
+  // ==========================================================================
   // HOME
-  // --------------------------------------------------------------------------
+  // ==========================================================================
 
-  function renderHome() {
-    const plays = totalPlays();
-    const correct = totalCorrect();
+  function Home() {
+    setAccent(null);
+    const stats = getStats();
     const challenges = DATA.challenges;
     const totalEntries = challenges.reduce((n, c) => n + c.entries.length, 0);
+    const denom = stats.guessTotal || 0;
+    const rate = denom ? Math.round((stats.correct / denom) * 100) : null;
 
-    const cards = challenges.map(cardHTML).join('');
+    const hero = el('section.hero',
+      el('span.eyebrow', el('span.pulse'), 'CASE FILES OPEN'),
+      el('h1.hero-title',
+        'Same prompt.',
+        el('br'),
+        el('span.hero-accent', 'Different models.'),
+        el('br'),
+        'Sealed until you call it.'),
+      el('p.hero-lead',
+        'Every model in the lineup got the exact same brief and built a game blind, ',
+        'in a single HTML file. Play each one, rate it, then match the build to the model. ',
+        'No logos, no tells — just the code, until you commit.'),
+      el('div.hero-stats',
+        stat(challenges.length, 'Open cases'),
+        stat(totalEntries, 'Sealed builds'),
+        stat(stats.correct, 'Calls you nailed'),
+        stat(rate == null ? '—' : rate + '%', 'Hit rate')));
 
-    APP.innerHTML = `
-      ${topbar()}
-      <main class="wrap">
-        <section class="home-hero">
-          <span class="eyebrow"><span class="dot"></span> BLIND&nbsp;AI&nbsp;ARENA</span>
-          <h1>Play the games.<br><span class="grad">Guess the model.</span></h1>
-          <p class="lead">
-            Several AI models were given the exact same prompt and told to build a game
-            in a single HTML file. Play each entry blind, then match it to the model you
-            think made it. Find out which model actually writes the best code — by feel.
-          </p>
+    const head = el('div.section-head',
+      el('h2', 'The lineup'),
+      el('span.section-hint', 'Pick a case. Builds are re-shuffled every round.'));
 
-          <div class="home-stats">
-            <div class="home-stat"><div class="n">${challenges.length}</div><div class="l">Challenges</div></div>
-            <div class="home-stat"><div class="n">${totalEntries}</div><div class="l">Anonymous entries</div></div>
-            <div class="home-stat"><div class="n">${correct}</div><div class="l">Correct guesses (you)</div></div>
-            <div class="home-stat"><div class="n">${plays}</div><div class="l">Rounds played</div></div>
-          </div>
-        </section>
+    const grid = el('div.case-grid',
+      challenges.length
+        ? challenges.map(caseCard)
+        : el('div.empty', el('div.empty-big', 'No cases yet.'), 'Add a challenge in js/data.js.'));
 
-        <div class="section-head">
-          <h2>Open challenges</h2>
-          <span class="hint">Pick one to play blind. Entries are shuffled every round.</span>
-        </div>
-
-        <div class="challenge-grid">
-          ${cards || emptyHTML('No challenges yet.')}
-        </div>
-      </main>
-      ${footer()}
-    `;
-    bindCards();
+    return mount(topbar(), el('main.wrap', hero, head, grid), footer());
   }
 
-  function emptyHTML(msg) {
-    return `<div class="empty" style="grid-column:1/-1"><div class="big">${escapeHtml(msg)}</div></div>`;
+  function stat(n, label) {
+    return el('div.stat', el('div.stat-n', String(n)), el('div.stat-l', label));
   }
 
-  function cardHTML(c) {
+  function caseCard(c) {
     const best = getBest(c.id);
+    const result = loadResult(c.id);
+    const progress = loadProgress(c.id);
     const n = c.entries.length;
-    // pips
-    const pips = Array.from({ length: Math.max(n, 2) }, (_, i) =>
-      `<span class="pip ${i < n ? 'filled' : ''}"></span>`).join('');
 
-    const status = best
-      ? `<span class="cc-score">Best <span class="best">${best.score}/${best.total}</span></span>`
-      : `<span class="cc-status">New</span>`;
+    const statusChip = best
+      ? el('span.case-best', 'Best ', el('b', `${best.score}/${best.total}`))
+      : progress
+        ? el('span.case-status.resume', 'In progress')
+        : el('span.case-status', 'New case');
 
-    return `
-      <button class="challenge-card" data-cid="${escapeHtml(c.id)}"
-        style="--card-accent:${escapeHtml(c.accent || '#ff3030')}">
-        <div class="cc-top">
-          <span class="cc-badge">Challenge</span>
-          ${status}
-        </div>
-        <div class="cc-title">${escapeHtml(c.title)}</div>
-        <div class="cc-tag">${escapeHtml(c.tagline || '')}</div>
-        <div class="cc-prompt">${escapeHtml(c.prompt)}</div>
-        <div class="cc-foot">
-          <span class="cc-entries">${pips} ${n} entr${n === 1 ? 'y' : 'ies'}</span>
-          <span class="btn btn-ghost" style="padding:8px 14px;font-size:13px">Play →</span>
-        </div>
-      </button>`;
+    const pips = el('div.case-pips',
+      Array.from({ length: n }, () => el('span.pip')));
+
+    const actions = el('div.case-actions',
+      el('button.btn.btn-accent', { onClick: () => go('/c/' + c.id) },
+        progress ? 'Resume →' : 'Open case →'),
+      result && el('button.btn.btn-quiet', { onClick: () => go('/c/' + c.id + '/result') },
+        'Last verdict'));
+
+    return el('article.case-card', { style: { '--case': c.accent || 'var(--accent)' } },
+      el('div.case-top',
+        el('span.case-badge', 'CASE'),
+        statusChip),
+      el('h3.case-title', c.title),
+      el('p.case-tag', c.tagline || ''),
+      el('div.case-prompt', el('span.case-prompt-mark', '$'), c.prompt),
+      el('div.case-foot', pips, el('span.case-count', `${n} sealed`)),
+      actions);
   }
 
-  function bindCards() {
-    $$('.challenge-card').forEach(card => {
-      card.addEventListener('click', () => go('/c/' + card.dataset.cid));
-    });
-  }
+  // ==========================================================================
+  // SESSION  (brief / play / guess / reveal live in-app, no hash churn)
+  // ==========================================================================
 
-  // --------------------------------------------------------------------------
-  // SESSION STATE
-  // --------------------------------------------------------------------------
-  // We hold the live session in a module-level variable so it survives re-renders
-  // triggered by hash changes within the same challenge.
-
-  let SESSION = null;
-
-  function startSession(challenge) {
-    // Shuffle entries into "slots": each slot has a display letter + the entry
-    const shuffled = shuffle(challenge.entries);
-    const slots = shuffled.map((entry, i) => ({
-      letter: LETTERS[i],
-      entry,                 // { id, model, file }
-      rating: 0,             // 0..5 (0 = unrated)
-    }));
-    SESSION = {
-      challenge,
-      phase: 'brief',        // brief | play | guess | reveal
-      slots,
-      active: 0,             // index into slots
-      guesses: {},           // letter -> modelName
-      result: null,          // {score, total, perLetter}
-    };
-  }
-
-  // Rebuild a completed session from its saved snapshot so its reveal can be
-  // re-opened. Returns true if a snapshot existed and was restored.
-  function restoreResultSession(challenge) {
-    const last = getLast(challenge.id);
-    if (!last || !Array.isArray(last.slots) || !last.slots.length) return false;
-
-    const slots = last.slots.map(sl => ({
-      letter: sl.letter,
-      entry: { id: sl.id, model: sl.model, file: sl.file },
-      rating: sl.rating || 0,
-    }));
-    const guesses = {};
-    const perLetter = {};
-    last.slots.forEach(sl => {
-      guesses[sl.letter] = sl.guess;
-      perLetter[sl.letter] = {
-        guess: sl.guess,
-        actual: sl.model,
-        correct: sl.guess === sl.model,
-        rating: sl.rating || 0,
-        entryId: sl.id,
-        file: sl.file,
-      };
-    });
-
-    SESSION = {
-      challenge,
-      phase: 'reveal',
-      slots,
-      active: 0,
-      guesses,
-      result: { score: last.score, total: last.total, perLetter },
-    };
-    return true;
-  }
-
-  function renderSession(cid, phaseArg) {
-    const challenge = byId(cid);
-    if (!challenge) { go('/'); return; }
+  function Session(challenge) {
     setAccent(challenge);
+    const saved = loadProgress(challenge.id);
+    const session = (saved && saved.phase !== 'reveal' && Array.isArray(saved.order) && saved.order.length)
+      ? reviveSession(challenge, saved)
+      : newSession(challenge);
 
-    if (!SESSION || SESSION.challenge.id !== cid) {
-      // Deep-linking / returning to a revealed round: rebuild it from the
-      // saved snapshot instead of restarting from scratch.
-      if (phaseArg === 'reveal' && restoreResultSession(challenge)) {
-        // SESSION now holds the restored reveal.
-      } else {
-        startSession(challenge);
-      }
-    } else if (phaseArg === 'reveal' && !SESSION.result) {
-      // Live session for this challenge but nothing revealed yet (e.g. clicked
-      // "View last result" from the briefing) — restore the saved snapshot.
-      restoreResultSession(challenge);
-    }
-    if (phaseArg && ['brief','play','guess','reveal'].includes(phaseArg) && phaseArg !== SESSION.phase) {
-      // Allow hash to drive phase transitions (e.g. back button).
-      // Guard: never auto-skip into 'reveal' without a result.
-      if (!(phaseArg === 'reveal' && !SESSION.result)) {
-        SESSION.phase = phaseArg;
-      }
-    }
+    const steps = subbarSteps();
+    const phaseSlot = el('main.session.wrap');
+    const subbar = el('div.subbar',
+      el('div.wrap.subbar-inner',
+        el('a.subbar-back', { href: '#/' }, '←', el('span', 'All cases')),
+        el('div.subbar-title',
+          el('span.st', challenge.title),
+          el('span.ss', `${challenge.entries.length} sealed builds · shuffled blind`)),
+        steps.node));
 
-    const shell = (inner) => `
-      ${topbar()}
-      <div class="session-bar">
-        <div class="wrap session-bar-inner">
-          <a class="session-back" href="#/" data-link>← All challenges</a>
-          <div class="session-title">
-            <span class="t">${escapeHtml(challenge.title)}</span>
-            <span class="s">${challenge.entries.length} anonymous entries · shuffled blind</span>
-          </div>
-          <div class="session-phase">
-            ${phaseChip('1','Play', SESSION.phase === 'play' || SESSION.phase === 'brief')}
-            <span class="sep">→</span>
-            ${phaseChip('2','Guess', SESSION.phase === 'guess')}
-            <span class="sep">→</span>
-            ${phaseChip('3','Reveal', SESSION.phase === 'reveal')}
-          </div>
-        </div>
-      </div>
-      <main class="session wrap">${inner}</main>
-    `;
+    mount(topbar(), subbar, phaseSlot, footer());
 
-    if (SESSION.phase === 'brief')  return APP.innerHTML = shell(renderBrief());
-    if (SESSION.phase === 'play')   return APP.innerHTML = shell(renderPlay());
-    if (SESSION.phase === 'guess')  return APP.innerHTML = shell(renderGuess());
-    if (SESSION.phase === 'reveal') return APP.innerHTML = shell(renderReveal());
+    const ctrl = {
+      session,
+      goPhase(phase, opts) {
+        session.phase = phase;
+        if (!opts || opts.persist !== false) saveProgress(session);
+        steps.set(phase);
+        phaseSlot.replaceChildren(this.build(phase));
+      },
+      build(phase) {
+        if (phase === 'play') return Play(ctrl);
+        if (phase === 'guess') return Guess(ctrl);
+        if (phase === 'reveal') return Reveal(ctrl);
+        return Brief(ctrl);
+      },
+      finish() {
+        const c = session.challenge;
+        const r = computeReveal(c, session.order, session.guesses, session.ratings);
+        session.result = { score: r.score, total: r.total, rows: r.rows };
+        saveResultWithDenominator(session);
+        clearProgress(c.id);
+        session.phase = 'reveal';
+        steps.set('reveal');
+        phaseSlot.replaceChildren(this.build('reveal'));
+      },
+      restart() {
+        clearProgress(session.challenge.id);
+        const fresh = newSession(session.challenge);
+        Object.assign(session, fresh);
+        this.goPhase('play');
+      },
+    };
+
+    ctrl.goPhase(session.phase, { persist: false });
   }
 
-  function phaseChip(n, label, active) {
-    return `<span class="step ${active ? 'active' : ''}">${n}. ${label}</span>`;
+  function saveResultWithDenominator(session) {
+    // saveResult + track guessTotal so the home hit-rate has an honest denominator.
+    saveResult(session);
+    const s = load();
+    s.stats = s.stats || { plays: 0, correct: 0 };
+    s.stats.guessTotal = (s.stats.guessTotal || 0) + session.result.total;
+    save(s);
+  }
+
+  function subbarSteps() {
+    const items = [
+      { key: 'play', n: '1', label: 'Play' },
+      { key: 'guess', n: '2', label: 'Call it' },
+      { key: 'reveal', n: '3', label: 'Reveal' },
+    ];
+    const nodes = {};
+    const wrap = el('div.subbar-steps',
+      items.map((it, i) => {
+        const step = el('span.step', el('i', it.n), it.label);
+        nodes[it.key] = step;
+        return [step, i < items.length - 1 ? el('span.step-sep', '/') : null];
+      }));
+    return {
+      node: wrap,
+      set(phase) {
+        const active = phase === 'brief' ? 'play' : phase;
+        Object.entries(nodes).forEach(([k, n]) => n.classList.toggle('active', k === active));
+      },
+    };
   }
 
   // --------------------------------------------------------------------------
-  // BRIEFING
+  // BRIEF
   // --------------------------------------------------------------------------
 
-  function renderBrief() {
-    const c = SESSION.challenge;
+  function Brief(ctrl) {
+    const c = ctrl.session.challenge;
     const n = c.entries.length;
-    const last = getLast(c.id);
-    const html = `
-      <section class="briefing">
-        <span class="eyebrow"><span class="dot"></span> CHALLENGE</span>
-        <h1>${escapeHtml(c.title)}</h1>
-        <p class="lead">${escapeHtml(c.tagline || '')}</p>
+    const result = loadResult(c.id);
 
-        <div class="prompt-block">
-          <div class="label">The exact prompt every model received</div>
-          <div class="text">"${escapeHtml(c.prompt)}"</div>
-          ${c.promptMeta ? `<div class="meta">${escapeHtml(c.promptMeta)}</div>` : ''}
-        </div>
+    const steps = [
+      ['01', 'Play blind', `${n} builds, tagged A–${LETTERS[n - 1]} in random order. Give each one a real spin.`],
+      ['02', 'Rate as you go', 'Star each build 1–5. We surface which model you secretly rated highest.'],
+      ['03', 'Call it', 'Match every model to a tag. Then the seals break and you see how sharp your eye is.'],
+    ];
 
-        <div class="howto">
-          <div class="howto-step">
-            <div class="num">STEP 1 — PLAY</div>
-            <div class="h">Try every entry</div>
-            <div class="d">${n} anonymous builds, labeled A–${LETTERS[n-1]}. Give each a fair spin. The order is randomized.</div>
-          </div>
-          <div class="howto-step">
-            <div class="num">STEP 2 — RATE (optional)</div>
-            <div class="h">Star your favourites</div>
-            <div class="d">Rate each entry 1–5 while you play. We'll show which model you secretly liked best.</div>
-          </div>
-          <div class="howto-step">
-            <div class="num">STEP 3 — GUESS</div>
-            <div class="h">Match model → entry</div>
-            <div class="d">Assign each model to a letter. Then the veil lifts and you see how you did.</div>
-          </div>
-        </div>
-
-        <div class="briefing-actions">
-          <button class="btn btn-primary btn-lg" id="start-play">Enter the arena →</button>
-          ${last ? `<button class="btn btn-ghost btn-lg" id="view-last">View last result · ${last.score}/${last.total} →</button>` : ''}
-          <div class="contestants">Models in the running: <b>${n}</b> · identities hidden until reveal</div>
-        </div>
-      </section>`;
-    requestAnimationFrame(() => {
-      const b = $('#start-play');
-      if (b) b.addEventListener('click', () => { SESSION.phase = 'play'; go('/c/' + SESSION.challenge.id + '/play'); });
-      const v = $('#view-last');
-      if (v) v.addEventListener('click', () => { go('/c/' + SESSION.challenge.id + '/reveal'); });
-    });
-    return html;
+    return el('section.brief',
+      el('span.eyebrow', el('span.pulse'), 'CASE BRIEFING'),
+      el('h1.brief-title', c.title),
+      el('p.brief-lead', c.tagline || ''),
+      el('div.dossier',
+        el('div.dossier-label', 'THE BRIEF — identical for every model'),
+        el('div.dossier-text', '“', c.prompt, '”'),
+        c.promptMeta && el('div.dossier-meta', c.promptMeta)),
+      el('div.brief-steps',
+        steps.map(([num, h, d]) =>
+          el('div.brief-step',
+            el('span.brief-step-n', num),
+            el('div.brief-step-h', h),
+            el('div.brief-step-d', d)))),
+      el('div.brief-actions',
+        el('button.btn.btn-accent.btn-lg', { onClick: () => ctrl.goPhase('play') }, 'Enter the lineup →'),
+        result && el('button.btn.btn-quiet.btn-lg', { onClick: () => go('/c/' + c.id + '/result') },
+          `Last verdict · ${result.score}/${result.total}`)),
+      el('p.brief-note', 'Models in the running: ', el('b', String(n)), ' · identities sealed until reveal'));
   }
 
   // --------------------------------------------------------------------------
-  // PLAY
+  // PLAY  — the iframe is built ONCE; rating/tab-state patch nodes in place.
   // --------------------------------------------------------------------------
 
-  function renderPlay() {
-    const c = SESSION.challenge;
-    const slot = SESSION.slots[SESSION.active];
-    const allRated = SESSION.slots.every(s => s.rating > 0);
-    const anyRated = SESSION.slots.some(s => s.rating > 0);
+  function Play(ctrl) {
+    const s = ctrl.session;
+    const c = s.challenge;
 
-    const tabs = SESSION.slots.map((s, i) => `
-      <button class="entry-tab ${i === SESSION.active ? 'active' : ''}" data-slot="${i}">
-        <span class="letter">${s.letter}</span>
-        Entry ${s.letter}
-        <span class="star-toggle ${s.rating > 0 ? 'on' : ''}" title="${s.rating ? s.rating + '/5' : 'unrated'}">${
-          s.rating > 0 ? '★'.repeat(Math.min(s.rating,1)) : '☆'
-        }</span>
-      </button>`).join('');
+    // Persistent iframe — never recreated while in Play.
+    const frame = el('iframe.stage-frame', {
+      title: 'Sealed build',
+      allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; fullscreen; gamepad; pointer-lock; web-share',
+      allowfullscreen: true,
+    });
 
-    const html = `
-      <div class="play-shell">
-        <div class="entry-tabs">${tabs}</div>
+    const overlayChip = el('span.stage-chip');
+    const stageWrap = el('div.stage', { id: 'stageWrap' },
+      frame,
+      el('div.stage-overlay',
+        overlayChip,
+        el('div.stage-tools',
+          el('button.icon-btn', { title: 'Fullscreen', onClick: toggleFullscreen }, iconFullscreen()),
+          el('button.icon-btn', { title: 'Open in new tab', onClick: () => window.open(frame.src, '_blank', 'noopener') }, iconExternal()))));
 
-        <div class="game-frame-wrap" id="frameWrap">
-          <iframe
-            id="gameFrame"
-            src="${escapeHtml(slot.entry.file)}"
-            title="Entry ${slot.letter}"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; fullscreen; gamepad; pointer-lock; web-share"
-            allowfullscreen
-          ></iframe>
-          <div class="game-overlay">
-            <span class="game-chip"><span class="letter">${slot.letter}</span> Entry ${slot.letter} · identity hidden</span>
-            <div class="game-toolbar">
-              <button class="icon-btn" id="fsBtn" title="Fullscreen" aria-label="Fullscreen">
-                ${ICON_FULLSCREEN}
-              </button>
-              <button class="icon-btn" id="newTabBtn" title="Open in new tab" aria-label="Open in new tab">
-                ${ICON_EXTERNAL}
-              </button>
-            </div>
-          </div>
-        </div>
+    // Tabs (filmstrip)
+    const tabEls = s.order.map((eid, i) =>
+      el('button.spec-tab', { onClick: () => setActive(i) },
+        el('span.spec-letter', LETTERS[i]),
+        el('span.spec-name', 'Entry ' + LETTERS[i]),
+        el('span.spec-tab-star')));
+    const tabs = el('div.spec-strip', tabEls);
 
-        <div class="play-foot">
-          <div class="rate-row">
-            <span class="lbl">Your rating for Entry ${slot.letter}:</span>
-            <div class="stars" data-slot="${SESSION.active}">
-              ${[1,2,3,4,5].map(n =>
-                `<span class="star ${n <= slot.rating ? 'on' : ''}" data-n="${n}">★</span>`
-              ).join('')}
-            </div>
-            ${slot.rating > 0 ? `<span class="lbl" style="color:var(--warn)">${slot.rating}/5</span>` : `<span class="lbl" style="color:var(--text-faint)">click to rate</span>`}
-          </div>
-          <div class="foot-nav">
-            <span class="foot-hint">${anyRated ? `${countRated()}/${SESSION.slots.length} rated · ` : ''}Click the game to capture input</span>
-            <button class="btn btn-primary" id="toGuess">
-              ${allRated ? 'Lock in my guesses' : 'Skip to guesses'} →
-            </button>
-          </div>
-        </div>
-      </div>`;
-    requestAnimationFrame(() => bindPlay());
-    return html;
-  }
+    // Rating bar
+    const starEls = [1, 2, 3, 4, 5].map(n =>
+      el('button.rate-star', { 'aria-label': `${n} of 5`, onClick: () => setRating(n) }, '★'));
+    starEls.forEach((star, idx) => {
+      const n = idx + 1;
+      star.addEventListener('mouseenter', () => paintStars(n, true));
+      star.addEventListener('mouseleave', () => paintStars(activeRating(), false));
+    });
+    const rateLabel = el('span.rate-label');
+    const rateRow = el('div.rate-row',
+      el('span.rate-lbl', 'Your read on this build'),
+      el('div.stars', starEls),
+      rateLabel);
 
-  function countRated() { return SESSION.slots.filter(s => s.rating > 0).length; }
+    const progress = el('span.play-progress');
+    const nextBtn = el('button.btn.btn-accent',
+      { onClick: () => (allRated() ? ctrl.goPhase('guess') : maybeGuess()) },
+      'Call it →');
 
-  function bindPlay() {
-    // tab switching
-    $$('.entry-tab').forEach(t => {
-      t.addEventListener('click', () => {
-        SESSION.active = +t.dataset.slot;
-        renderCurrent();
+    const root = el('div.play',
+      tabs,
+      stageWrap,
+      el('div.play-foot',
+        rateRow,
+        el('div.play-nav', progress, el('button.btn.btn-quiet', { onClick: () => ctrl.goPhase('brief') }, 'Briefing'), nextBtn)));
+
+    // ---- in-place patch helpers (no rebuild) ----
+    function activeEid() { return s.order[s.active]; }
+    function activeRating() { return s.ratings[activeEid()] || 0; }
+
+    function paintStars(n, hover) {
+      starEls.forEach((st, i) => {
+        st.classList.toggle('on', i < n);
+        st.classList.toggle('hover', hover && i < n);
       });
-    });
-
-    // rating
-    $$('.stars').forEach(group => {
-      const slotIdx = +group.dataset.slot;
-      group.querySelectorAll('.star').forEach(star => {
-        star.addEventListener('click', () => {
-          const n = +star.dataset.n;
-          const cur = SESSION.slots[slotIdx].rating;
-          SESSION.slots[slotIdx].rating = (cur === n) ? 0 : n; // toggle off if same
-          renderCurrent();
-        });
-        star.addEventListener('mouseenter', () => previewStars(group, +star.dataset.n));
-        star.addEventListener('mouseleave', () => previewStars(group, SESSION.slots[slotIdx].rating));
-      });
-    });
-
-    // fullscreen
-    $('#fsBtn')?.addEventListener('click', () => {
-      const wrap = $('#frameWrap');
-      if (!document.fullscreenElement) {
-        (wrap.requestFullscreen || wrap.webkitRequestFullscreen)?.call(wrap);
-      } else {
-        (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
-      }
-    });
-
-    // new tab
-    $('#newTabBtn')?.addEventListener('click', () => {
-      const f = $('#gameFrame');
-      if (f?.src) window.open(f.src, '_blank', 'noopener');
-    });
-
-    // proceed
-    $('#toGuess')?.addEventListener('click', () => {
-      SESSION.phase = 'guess';
-      go('/c/' + SESSION.challenge.id + '/guess');
-    });
-  }
-
-  function previewStars(group, n) {
-    group.querySelectorAll('.star').forEach(s => {
-      s.classList.toggle('on', +s.dataset.n <= n);
-    });
-  }
-
-  // re-render the current phase (keeps SESSION)
-  function renderCurrent() {
-    if (SESSION.phase === 'play') {
-      APP.innerHTML = APPinnerHTML_play();
-      requestAnimationFrame(bindPlay);
-    } else {
-      route();
     }
+    function renderRating() {
+      const r = activeRating();
+      paintStars(r, false);
+      rateLabel.textContent = r ? `${r}/5` : 'tap to rate';
+      rateLabel.classList.toggle('set', !!r);
+    }
+    function renderTabs() {
+      tabEls.forEach((t, i) => {
+        t.classList.toggle('active', i === s.active);
+        const r = s.ratings[s.order[i]] || 0;
+        const star = t.querySelector('.spec-tab-star');
+        star.textContent = r ? '★'.repeat(1) : '';
+        star.classList.toggle('rated', !!r);
+        t.classList.toggle('seen', i === s.active || !!r);
+      });
+    }
+    function renderProgress() {
+      const rated = s.order.filter(id => s.ratings[id]).length;
+      progress.textContent = `${rated}/${s.order.length} rated`;
+      nextBtn.textContent = allRated() ? 'Lock in your calls →' : 'Call it →';
+    }
+    function allRated() { return s.order.every(id => s.ratings[id]); }
+
+    // ---- actions ----
+    function setActive(i) {
+      if (i === s.active && frame.src) { return; }
+      s.active = i;
+      const entry = entryById(c, s.order[i]);
+      frame.src = entry.file;                 // ONLY place the iframe reloads
+      overlayChip.replaceChildren(el('b', LETTERS[i]), ` Entry ${LETTERS[i]} · identity sealed`);
+      renderTabs(); renderRating();
+      saveProgress(s);
+    }
+    function setRating(n) {
+      const eid = activeEid();
+      s.ratings[eid] = (s.ratings[eid] === n) ? 0 : n;   // toggle off if same
+      renderRating(); renderTabs(); renderProgress();     // patch only — no iframe touch
+      saveProgress(s);
+    }
+    function maybeGuess() {
+      ctrl.goPhase('guess'); // rating optional
+    }
+
+    // initial paint (sets src once)
+    setActive(s.active);
+    renderProgress();
+    return root;
   }
-  // small helper to wrap play in the session shell without going through hash
-  function APPinnerHTML_play() {
-    const c = SESSION.challenge;
-    setAccent(c);
-    const shell = (inner) => `
-      ${topbar()}
-      <div class="session-bar">
-        <div class="wrap session-bar-inner">
-          <a class="session-back" href="#/" data-link>← All challenges</a>
-          <div class="session-title">
-            <span class="t">${escapeHtml(c.title)}</span>
-            <span class="s">${c.entries.length} anonymous entries · shuffled blind</span>
-          </div>
-          <div class="session-phase">
-            ${phaseChip('1','Play', true)}
-            <span class="sep">→</span>
-            ${phaseChip('2','Guess', false)}
-            <span class="sep">→</span>
-            ${phaseChip('3','Reveal', false)}
-          </div>
-        </div>
-      </div>
-      <main class="session wrap">${inner}</main>`;
-    return shell(renderPlay());
+
+  function toggleFullscreen() {
+    const wrap = document.getElementById('stageWrap');
+    if (!wrap) return;
+    if (!document.fullscreenElement) (wrap.requestFullscreen || wrap.webkitRequestFullscreen)?.call(wrap);
+    else (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
   }
 
   // --------------------------------------------------------------------------
-  // GUESS
+  // GUESS  — full roster (with decoys); in-place option/disabled updates.
   // --------------------------------------------------------------------------
 
-  function renderGuess() {
-    const c = SESSION.challenge;
-    // The "menu": the full roster of candidate models (with decoys), so the
-    // answer can't be deduced by elimination. Any model an entry actually uses
-    // is always included even if it's missing from the roster.
-    const roster = Array.isArray(DATA.models) ? DATA.models : [];
-    const models = Array.from(new Set([...roster, ...c.entries.map(e => e.model)]));
-    const slots = SESSION.slots;
+  function Guess(ctrl) {
+    const s = ctrl.session;
+    const c = s.challenge;
+    const models = rosterModels();
 
-    const filled = slots.filter(s => SESSION.guesses[s.letter]).length;
-    const allFilled = filled === slots.length;
+    const selects = [];
+    const rows = s.order.map((eid, i) => {
+      const letter = LETTERS[i];
+      const rating = s.ratings[eid] || 0;
+      const sel = el('select.model-select', { dataset: { letter }, onChange: onChange },
+        el('option', { value: '' }, '— name the model —'),
+        models.map(m => el('option', { value: m }, m)));
+      sel.value = s.guesses[letter] || '';
+      selects.push(sel);
+      return el('div.call-row', { dataset: { letter } },
+        el('div.call-letter', letter),
+        el('div.call-meta',
+          el('div.call-name', 'Entry ' + letter),
+          el('div.call-sub', rating ? `you rated it ${rating}/5` : 'unrated')),
+        el('div.select-wrap', sel));
+    });
 
-    const rows = slots.map(s => {
-      const guess = SESSION.guesses[s.letter] || '';
-      return `
-        <div class="guess-row ${guess ? 'filled' : ''}" data-letter="${s.letter}">
-          <div class="guess-letter">${s.letter}</div>
-          <div class="guess-meta">
-            <div class="name">Entry ${s.letter}</div>
-            <div class="sub">${s.rating > 0 ? `your rating: ${s.rating}/5` : 'not rated'}</div>
-          </div>
-          <select class="model-select" data-letter="${s.letter}">
-            <option value="" ${!guess ? 'selected' : ''}>— pick a model —</option>
-            ${models.map(m => {
-              const taken = Object.entries(SESSION.guesses).some(([l, v]) => v === m && l !== s.letter);
-              return `<option value="${escapeHtml(m)}" ${guess === m ? 'selected' : ''} ${taken ? 'disabled' : ''}>
-                ${escapeHtml(m)}${taken ? ' (used)' : ''}
-              </option>`;
-            }).join('')}
-          </select>
-        </div>`;
-    }).join('');
+    const progress = el('span.call-progress');
+    const revealBtn = el('button.btn.btn-accent', { onClick: reveal }, 'Break the seals ↑');
 
-    const html = `
-      <div class="guess-shell">
-        <h2>Who built what?</h2>
-        <p class="lead">
-          For each anonymous entry, pick the model you think made it.
-          Each model can only be used once. Trust your gut — you can't change this after revealing.
-        </p>
+    const root = el('section.call',
+      el('h2.call-h', 'Who built what?'),
+      el('p.call-lead', 'For each sealed build, name the model you think made it. Each model can be used once. Trust your gut — calls are final once revealed.'),
+      el('div.call-list', rows),
+      el('div.call-foot',
+        progress,
+        el('div.call-buttons',
+          el('button.btn.btn-quiet', { onClick: () => ctrl.goPhase('play') }, '← Back to play'),
+          revealBtn)));
 
-        <div class="guess-list">${rows}</div>
-
-        <div class="guess-foot">
-          <div class="guess-progress"><b>${filled}</b> / ${slots.length} matched</div>
-          <div style="display:flex;gap:10px">
-            <button class="btn btn-ghost" id="backPlay">← Back to play</button>
-            <button class="btn btn-primary" id="reveal" ${allFilled ? '' : 'disabled'}>
-              Reveal answers ↑
-            </button>
-          </div>
-        </div>
-      </div>`;
-    requestAnimationFrame(() => bindGuess());
-    return html;
-  }
-
-  // Reflect the current guesses into the DOM in place — no full re-render, so
-  // the native <select> keeps working across every pick (the old full re-render
-  // double-bound listeners and broke voting after the first choice).
-  function refreshGuessUI() {
-    const selects = $$('.model-select');
-    selects.forEach(sel => {
+    function onChange(e) {
+      const sel = e.currentTarget;
       const letter = sel.dataset.letter;
-      Array.from(sel.options).forEach(opt => {
-        if (opt.value === '') return;
-        const taken = Object.entries(SESSION.guesses).some(([l, v]) => v === opt.value && l !== letter);
-        opt.disabled = taken;
-        opt.textContent = opt.value + (taken ? ' (used)' : '');
-      });
-      sel.value = SESSION.guesses[letter] || '';
-      const row = sel.closest('.guess-row');
-      if (row) row.classList.toggle('filled', !!SESSION.guesses[letter]);
-    });
-
-    const filled = SESSION.slots.filter(s => SESSION.guesses[s.letter]).length;
-    const prog = $('.guess-progress');
-    if (prog) prog.innerHTML = `<b>${filled}</b> / ${SESSION.slots.length} matched`;
-    const revealBtn = $('#reveal');
-    if (revealBtn) revealBtn.disabled = filled !== SESSION.slots.length;
-  }
-
-  function bindGuess() {
-    $$('.model-select').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const letter = sel.dataset.letter;
-        if (sel.value) SESSION.guesses[letter] = sel.value;
-        else delete SESSION.guesses[letter];
-        refreshGuessUI();
-      });
-    });
-
-    $('#backPlay')?.addEventListener('click', () => {
-      SESSION.phase = 'play';
-      go('/c/' + SESSION.challenge.id + '/play');
-    });
-
-    $('#reveal')?.addEventListener('click', () => {
-      if (Object.keys(SESSION.guesses).length !== SESSION.slots.length) {
-        toast('Match every entry to a model first.');
-        return;
-      }
-      computeResult();
-      SESSION.phase = 'reveal';
-      go('/c/' + SESSION.challenge.id + '/reveal');
-    });
-  }
-
-  // --------------------------------------------------------------------------
-  // RESULT
-  // --------------------------------------------------------------------------
-
-  function computeResult() {
-    let score = 0;
-    const perLetter = {};
-    SESSION.slots.forEach(s => {
-      const guess = SESSION.guesses[s.letter];
-      const correct = guess === s.entry.model;
-      if (correct) score++;
-      perLetter[s.letter] = { guess, actual: s.entry.model, correct, rating: s.rating, entryId: s.entry.id, file: s.entry.file };
-    });
-    const total = SESSION.slots.length;
-    SESSION.result = { score, total, perLetter };
-    recordResult(SESSION.challenge.id, score, total);
-    saveLastResult(SESSION.challenge.id);
-  }
-
-  // --------------------------------------------------------------------------
-  // REVEAL
-  // --------------------------------------------------------------------------
-
-  function renderReveal() {
-    const c = SESSION.challenge;
-    const r = SESSION.result;
-    if (!r) { SESSION.phase = 'play'; return ''; }
-
-    const pct = r.total ? Math.round(r.score / r.total * 100) : 0;
-    const verdict =
-      r.score === r.total ? 'Flawless. You read these models like a book.' :
-      pct >= 60            ? 'Sharp eye — well above chance.' :
-      pct >= 40            ? 'Mixed bag. Hard to tell, huh?' :
-                             'Tough round. They fooled you.';
-
-    const rows = SESSION.slots.map(s => {
-      const p = r.perLetter[s.letter];
-      return `
-        <div class="reveal-row ${p.correct ? 'correct' : 'wrong'}">
-          <div class="guess-letter">${s.letter}</div>
-          <div class="reveal-info">
-            <div class="model">${escapeHtml(p.actual)}</div>
-            <div class="your">
-              you guessed <span class="${p.correct ? 'ok' : 'no'}">${escapeHtml(p.guess || '—')}</span>
-            </div>
-            <a class="reveal-open" href="${escapeHtml(p.file || s.entry.file)}" target="_blank" rel="noopener">Open Entry ${s.letter} ↗</a>
-          </div>
-          <div class="reveal-rating">${s.rating > 0 ? `★ ${s.rating}/5` : `<span class="none">unrated</span>`}</div>
-          <div class="verdict-pill ${p.correct ? 'ok' : 'no'}">${p.correct ? 'CORRECT' : 'WRONG'}</div>
-        </div>`;
-    }).join('');
-
-    // Favourite model summary (by your ratings)
-    const ratedSlots = SESSION.slots.filter(s => s.rating > 0);
-    let summary = '';
-    if (ratedSlots.length) {
-      // pick top-rated entry(ies)
-      const max = Math.max(...ratedSlots.map(s => s.rating));
-      const tops = ratedSlots.filter(s => s.rating === max);
-      const names = tops.map(s => s.entry.model);
-      const yourFav = names.length === SESSION.slots.filter(s=>s.rating>0).length && new Set(ratedSlots.map(s=>s.rating)).size === 1
-        ? `You rated every entry ${max}/5 — even-handed judge.`
-        : names.length === 1
-          ? `Your top-rated entry was built by <b>${escapeHtml(names[0])}</b>.`
-          : `Your top-rated entries: <b>${names.map(escapeHtml).join(', ')}</b>.`;
-      summary = `
-        <div class="summary-card">
-          <span class="ico">★</span>
-          <span class="txt">${yourFav}</span>
-        </div>`;
+      if (sel.value) s.guesses[letter] = sel.value;
+      else delete s.guesses[letter];
+      refresh();
+      saveProgress(s);
     }
 
-    const best = getBest(c.id);
-
-    const html = `
-        <section class="reveal-shell">
-          <div class="score-hero">
-            <div class="label">You scored</div>
-            <div class="score">${r.score}<small>/${r.total}</small></div>
-            <div class="verdict">${escapeHtml(verdict)}</div>
-            ${best ? `<div class="best-line">personal best: ${best.score}/${best.total}</div>` : ''}
-          </div>
-
-          ${summary}
-
-          <div class="reveal-list">${rows}</div>
-
-          <div class="reveal-actions">
-            <button class="btn btn-ghost btn-lg" id="playAgain">↻ Play again (re-shuffled)</button>
-            <a class="btn btn-primary btn-lg" href="#/" data-link>All challenges →</a>
-          </div>
-        </section>`;
-
-    requestAnimationFrame(() => {
-      $('#playAgain')?.addEventListener('click', () => {
-        startSession(c); // fresh shuffle
-        go('/c/' + c.id + '/play');
+    function refresh() {
+      selects.forEach(sel => {
+        const letter = sel.dataset.letter;
+        Array.from(sel.options).forEach(opt => {
+          if (!opt.value) return;
+          const taken = Object.entries(s.guesses).some(([l, v]) => v === opt.value && l !== letter);
+          opt.disabled = taken;
+          opt.textContent = opt.value + (taken ? '  (used)' : '');
+        });
+        sel.value = s.guesses[letter] || '';
+        const row = sel.closest('.call-row');
+        if (row) row.classList.toggle('filled', !!s.guesses[letter]);
       });
+      const filled = s.order.filter((_, i) => s.guesses[LETTERS[i]]).length;
+      progress.replaceChildren(el('b', String(filled)), ` / ${s.order.length} named`);
+      revealBtn.disabled = filled !== s.order.length;
+    }
+
+    function reveal() {
+      const filled = s.order.filter((_, i) => s.guesses[LETTERS[i]]).length;
+      if (filled !== s.order.length) { toast('Name every build before revealing.'); return; }
+      ctrl.finish();
+    }
+
+    refresh();
+    return root;
+  }
+
+  // --------------------------------------------------------------------------
+  // REVEAL  (live) and RESULT view (from storage) share revealScreen()
+  // --------------------------------------------------------------------------
+
+  function Reveal(ctrl) {
+    const s = ctrl.session;
+    const r = s.result || computeReveal(s.challenge, s.order, s.guesses, s.ratings);
+    return revealScreen(s.challenge, r, {
+      actions: [
+        el('button.btn.btn-accent.btn-lg', { onClick: () => ctrl.restart() }, '↻ New round (re-shuffled)'),
+        el('a.btn.btn-quiet.btn-lg', { href: '#/' }, 'All cases →'),
+      ],
     });
-    return html;
+  }
+
+  function ResultView(challenge) {
+    setAccent(challenge);
+    const saved = loadResult(challenge.id);
+    if (!saved) { go('/c/' + challenge.id); return; }
+    const r = computeReveal(challenge, saved.order, saved.guesses, saved.ratings);
+
+    const subbar = el('div.subbar',
+      el('div.wrap.subbar-inner',
+        el('a.subbar-back', { href: '#/' }, '←', el('span', 'All cases')),
+        el('div.subbar-title',
+          el('span.st', challenge.title),
+          el('span.ss', 'saved verdict')),
+        el('div.subbar-steps', el('span.step.active', el('i', '✓'), 'Verdict'))));
+
+    const screen = revealScreen(challenge, r, {
+      replay: true,
+      actions: [
+        el('button.btn.btn-accent.btn-lg', { onClick: () => { clearProgress(challenge.id); go('/c/' + challenge.id); } }, '↻ Play again'),
+        el('a.btn.btn-quiet.btn-lg', { href: '#/' }, 'All cases →'),
+      ],
+    });
+
+    mount(topbar(), subbar, el('main.session.wrap', screen), footer());
+  }
+
+  function revealScreen(challenge, r, opts) {
+    opts = opts || {};
+    const pct = r.total ? Math.round((r.score / r.total) * 100) : 0;
+    const verdict =
+      r.score === r.total ? 'Flawless read. You know these models cold.' :
+      pct >= 60 ? 'Sharp — well above chance.' :
+      pct >= 40 ? 'A real coin-toss. Slippery bunch.' :
+        'They had you fooled this round.';
+
+    const hero = el('div.verdict-hero',
+      el('div.verdict-label', 'You called'),
+      el('div.verdict-score', String(r.score), el('small', '/' + r.total)),
+      el('div.verdict-line', verdict),
+      (() => { const b = getBest(challenge.id); return b ? el('div.verdict-best', `personal best · ${b.score}/${b.total}`) : null; })());
+
+    // favourite (by rating)
+    const rated = r.rows.filter(x => x.rating > 0);
+    let fav = null;
+    if (rated.length) {
+      const max = Math.max(...rated.map(x => x.rating));
+      const tops = rated.filter(x => x.rating === max);
+      const allSame = rated.length === r.rows.length && new Set(rated.map(x => x.rating)).size === 1;
+      fav = el('div.fav-card', el('span.fav-ico', '★'),
+        el('span.fav-txt', allSame
+          ? `You rated every build ${max}/5 — even-handed judge.`
+          : tops.length === 1
+            ? ['Your top-rated build was ', el('b', tops[0].actual), '.']
+            : ['Your top-rated builds: ', el('b', tops.map(t => t.actual).join(', ')), '.']));
+    }
+
+    const rows = el('div.reveal-list',
+      r.rows.map((x, i) =>
+        el('div.reveal-row ' + (x.correct ? 'correct' : 'wrong'), { style: { '--i': i } },
+          el('div.reveal-letter', x.letter),
+          el('div.reveal-info',
+            el('div.reveal-model', x.actual),
+            el('div.reveal-your',
+              'your call: ',
+              el('span', { class: x.correct ? 'ok' : 'no' }, x.guess || '—')),
+            el('a.reveal-open', { href: x.file, target: '_blank', rel: 'noopener' }, `Open Entry ${x.letter} ↗`)),
+          el('div.reveal-rating', x.rating ? `★ ${x.rating}/5` : el('span.none', 'unrated')),
+          el('div.stamp ' + (x.correct ? 'ok' : 'no'), x.correct ? 'CALLED' : 'MISSED'))));
+
+    return el('section.reveal',
+      hero,
+      fav,
+      rows,
+      el('div.reveal-actions', opts.actions || []));
   }
 
   // --------------------------------------------------------------------------
   // Icons
   // --------------------------------------------------------------------------
 
-  const ICON_FULLSCREEN = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
-  const ICON_EXTERNAL   = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>`;
+  function iconFullscreen() {
+    return el('span.ic', { html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>` });
+  }
+  function iconExternal() {
+    return el('span.ic', { html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>` });
+  }
 
   // --------------------------------------------------------------------------
-  // Boot
+  // Router
   // --------------------------------------------------------------------------
 
-  // Intercept same-page hash links rendered as <a href="#/...">
-  document.addEventListener('click', e => {
-    const a = e.target.closest('a[data-link]');
-    if (!a) return;
-    const href = a.getAttribute('href') || '';
-    if (href.startsWith('#/')) {
-      e.preventDefault();
-      go(href.slice(1));
+  function route() {
+    const h = location.hash.replace(/^#/, '') || '/';
+    const parts = h.split('/').filter(Boolean);
+    if (parts.length === 0) return Home();
+    if (parts[0] === 'c' && parts[1]) {
+      const c = byId(parts[1]);
+      if (!c) return go('/');
+      if (parts[2] === 'result') return ResultView(c);
+      return Session(c);
     }
-  });
+    return Home();
+  }
 
+  window.addEventListener('hashchange', route);
   route();
 })();
