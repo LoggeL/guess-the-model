@@ -76,6 +76,32 @@
     saveStore(s);
   }
 
+  // Full snapshot of the most recent revealed round, so a result can be
+  // re-opened later (even after a reload) instead of vanishing.
+  function saveLastResult(challengeId) {
+    if (!SESSION || !SESSION.result) return;
+    const s = loadStore();
+    if (!s.last) s.last = {};
+    s.last[challengeId] = {
+      when: Date.now(),
+      score: SESSION.result.score,
+      total: SESSION.result.total,
+      slots: SESSION.slots.map(sl => ({
+        letter: sl.letter,
+        id: sl.entry.id,
+        model: sl.entry.model,
+        file: sl.entry.file,
+        rating: sl.rating,
+        guess: SESSION.guesses[sl.letter] || '',
+      })),
+    };
+    saveStore(s);
+  }
+  function getLast(challengeId) {
+    const s = loadStore();
+    return (s.last && s.last[challengeId]) || null;
+  }
+
   function totalPlays() {
     const s = loadStore();
     return (s.plays || []).length;
@@ -258,13 +284,59 @@
     };
   }
 
+  // Rebuild a completed session from its saved snapshot so its reveal can be
+  // re-opened. Returns true if a snapshot existed and was restored.
+  function restoreResultSession(challenge) {
+    const last = getLast(challenge.id);
+    if (!last || !Array.isArray(last.slots) || !last.slots.length) return false;
+
+    const slots = last.slots.map(sl => ({
+      letter: sl.letter,
+      entry: { id: sl.id, model: sl.model, file: sl.file },
+      rating: sl.rating || 0,
+    }));
+    const guesses = {};
+    const perLetter = {};
+    last.slots.forEach(sl => {
+      guesses[sl.letter] = sl.guess;
+      perLetter[sl.letter] = {
+        guess: sl.guess,
+        actual: sl.model,
+        correct: sl.guess === sl.model,
+        rating: sl.rating || 0,
+        entryId: sl.id,
+        file: sl.file,
+      };
+    });
+
+    SESSION = {
+      challenge,
+      phase: 'reveal',
+      slots,
+      active: 0,
+      guesses,
+      result: { score: last.score, total: last.total, perLetter },
+    };
+    return true;
+  }
+
   function renderSession(cid, phaseArg) {
     const challenge = byId(cid);
     if (!challenge) { go('/'); return; }
     setAccent(challenge);
 
     if (!SESSION || SESSION.challenge.id !== cid) {
-      startSession(challenge);
+      // Deep-linking / returning to a revealed round: rebuild it from the
+      // saved snapshot instead of restarting from scratch.
+      if (phaseArg === 'reveal' && restoreResultSession(challenge)) {
+        // SESSION now holds the restored reveal.
+      } else {
+        startSession(challenge);
+      }
+    } else if (phaseArg === 'reveal' && !SESSION.result) {
+      // Live session for this challenge but nothing revealed yet (e.g. clicked
+      // "View last result" from the briefing) — restore the saved snapshot.
+      restoreResultSession(challenge);
     }
     if (phaseArg && ['brief','play','guess','reveal'].includes(phaseArg) && phaseArg !== SESSION.phase) {
       // Allow hash to drive phase transitions (e.g. back button).
@@ -312,6 +384,7 @@
   function renderBrief() {
     const c = SESSION.challenge;
     const n = c.entries.length;
+    const last = getLast(c.id);
     const html = `
       <section class="briefing">
         <span class="eyebrow"><span class="dot"></span> CHALLENGE</span>
@@ -344,12 +417,15 @@
 
         <div class="briefing-actions">
           <button class="btn btn-primary btn-lg" id="start-play">Enter the arena →</button>
+          ${last ? `<button class="btn btn-ghost btn-lg" id="view-last">View last result · ${last.score}/${last.total} →</button>` : ''}
           <div class="contestants">Models in the running: <b>${n}</b> · identities hidden until reveal</div>
         </div>
       </section>`;
     requestAnimationFrame(() => {
       const b = $('#start-play');
       if (b) b.addEventListener('click', () => { SESSION.phase = 'play'; go('/c/' + SESSION.challenge.id + '/play'); });
+      const v = $('#view-last');
+      if (v) v.addEventListener('click', () => { go('/c/' + SESSION.challenge.id + '/reveal'); });
     });
     return html;
   }
@@ -516,8 +592,11 @@
 
   function renderGuess() {
     const c = SESSION.challenge;
-    // unique model names (the "menu")
-    const models = Array.from(new Set(c.entries.map(e => e.model)));
+    // The "menu": the full roster of candidate models (with decoys), so the
+    // answer can't be deduced by elimination. Any model an entry actually uses
+    // is always included even if it's missing from the roster.
+    const roster = Array.isArray(DATA.models) ? DATA.models : [];
+    const models = Array.from(new Set([...roster, ...c.entries.map(e => e.model)]));
     const slots = SESSION.slots;
 
     const filled = slots.filter(s => SESSION.guesses[s.letter]).length;
@@ -564,19 +643,42 @@
           </div>
         </div>
       </div>`;
-    requestAnimationFrame(() => bindGuess(models));
+    requestAnimationFrame(() => bindGuess());
     return html;
   }
 
-  function bindGuess(models) {
+  // Reflect the current guesses into the DOM in place — no full re-render, so
+  // the native <select> keeps working across every pick (the old full re-render
+  // double-bound listeners and broke voting after the first choice).
+  function refreshGuessUI() {
+    const selects = $$('.model-select');
+    selects.forEach(sel => {
+      const letter = sel.dataset.letter;
+      Array.from(sel.options).forEach(opt => {
+        if (opt.value === '') return;
+        const taken = Object.entries(SESSION.guesses).some(([l, v]) => v === opt.value && l !== letter);
+        opt.disabled = taken;
+        opt.textContent = opt.value + (taken ? ' (used)' : '');
+      });
+      sel.value = SESSION.guesses[letter] || '';
+      const row = sel.closest('.guess-row');
+      if (row) row.classList.toggle('filled', !!SESSION.guesses[letter]);
+    });
+
+    const filled = SESSION.slots.filter(s => SESSION.guesses[s.letter]).length;
+    const prog = $('.guess-progress');
+    if (prog) prog.innerHTML = `<b>${filled}</b> / ${SESSION.slots.length} matched`;
+    const revealBtn = $('#reveal');
+    if (revealBtn) revealBtn.disabled = filled !== SESSION.slots.length;
+  }
+
+  function bindGuess() {
     $$('.model-select').forEach(sel => {
       sel.addEventListener('change', () => {
         const letter = sel.dataset.letter;
         if (sel.value) SESSION.guesses[letter] = sel.value;
         else delete SESSION.guesses[letter];
-        // re-render to update "used" options + progress
-        APP.innerHTML = APPinnerHTML_guess();
-        requestAnimationFrame(() => bindGuess(models));
+        refreshGuessUI();
       });
     });
 
@@ -596,31 +698,6 @@
     });
   }
 
-  function APPinnerHTML_guess() {
-    const c = SESSION.challenge;
-    setAccent(c);
-    const shell = (inner) => `
-      ${topbar()}
-      <div class="session-bar">
-        <div class="wrap session-bar-inner">
-          <a class="session-back" href="#/" data-link>← All challenges</a>
-          <div class="session-title">
-            <span class="t">${escapeHtml(c.title)}</span>
-            <span class="s">${c.entries.length} anonymous entries · shuffled blind</span>
-          </div>
-          <div class="session-phase">
-            ${phaseChip('1','Play', false)}
-            <span class="sep">→</span>
-            ${phaseChip('2','Guess', true)}
-            <span class="sep">→</span>
-            ${phaseChip('3','Reveal', false)}
-          </div>
-        </div>
-      </div>
-      <main class="session wrap">${inner}</main>`;
-    return shell(renderGuess());
-  }
-
   // --------------------------------------------------------------------------
   // RESULT
   // --------------------------------------------------------------------------
@@ -637,6 +714,7 @@
     const total = SESSION.slots.length;
     SESSION.result = { score, total, perLetter };
     recordResult(SESSION.challenge.id, score, total);
+    saveLastResult(SESSION.challenge.id);
   }
 
   // --------------------------------------------------------------------------
@@ -665,6 +743,7 @@
             <div class="your">
               you guessed <span class="${p.correct ? 'ok' : 'no'}">${escapeHtml(p.guess || '—')}</span>
             </div>
+            <a class="reveal-open" href="${escapeHtml(p.file || s.entry.file)}" target="_blank" rel="noopener">Open Entry ${s.letter} ↗</a>
           </div>
           <div class="reveal-rating">${s.rating > 0 ? `★ ${s.rating}/5` : `<span class="none">unrated</span>`}</div>
           <div class="verdict-pill ${p.correct ? 'ok' : 'no'}">${p.correct ? 'CORRECT' : 'WRONG'}</div>
