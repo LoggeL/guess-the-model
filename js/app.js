@@ -167,12 +167,6 @@
     };
   }
 
-  function rosterModels() {
-    const roster = Array.isArray(DATA.models) ? DATA.models : [];
-    const used = DATA.challenges.flatMap(c => c.entries.map(e => e.model));
-    return Array.from(new Set([...roster, ...used]));
-  }
-
   // Distinct models actually competing in a given challenge (the visible lineup).
   function challengeModels(challenge) {
     return Array.from(new Set(challenge.entries.map(e => e.model)));
@@ -568,7 +562,8 @@
   function Guess(ctrl) {
     const s = ctrl.session;
     const c = s.challenge;
-    const models = rosterModels();
+    // Only the models that actually competed — the task is to order them correctly.
+    const models = challengeModels(c);
 
     const selects = [];
     const rows = s.order.map((eid, i) => {

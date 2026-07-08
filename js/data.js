@@ -15,24 +15,8 @@
 // ============================================================================
 
 window.GTM_DATA = {
-  // Full roster of candidate models offered in the guess dropdown for every
-  // challenge. Includes decoys on purpose so the answer can't be deduced by
-  // elimination — you see all models, not just the ones that actually entered.
-  // (Any model referenced by an entry below is always shown even if missing here.)
-  models: [
-    'Claude Opus 4.8',
-    'Claude Sonnet 5',
-    'DeepSeek V4',
-    'Fable 5.0',
-    'Gemini 3 Pro',
-    'GLM-5.2',
-    'GPT-5.5 Pro',
-    'Grok 4.5',
-    'Llama 4 Maverick',
-    'Mistral Large 3',
-    'o4-high',
-    'Qwen 3 Max',
-  ],
+  // The guess step offers exactly the models that competed in each challenge —
+  // the task is to match every entrant to the right build. No decoys.
   challenges: [
     {
       id: 'ultrakill-clone',
