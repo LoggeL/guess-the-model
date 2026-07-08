@@ -27,8 +27,8 @@ window.GTM_DATA = {
       entries: [
         { id: 'k3x7a9', model: 'GLM-5.2',  file: 'games/ultrakill-clone/k3x7a9.html' },
         { id: 'm9p2q4', model: 'Grok 4.5', file: 'games/ultrakill-clone/m9p2q4.html' },
-        // { id: 'p7r8x2', model: 'GPT-5.5 Pro', file: 'games/ultrakill-clone/p7r8x2.html' },
-        // { id: 't4v6w1', model: 'Fable 5.0',    file: 'games/ultrakill-clone/t4v6w1.html' },
+        { id: 'p7r8x2', model: 'GPT-5.5 Pro', file: 'games/ultrakill-clone/p7r8x2.html' },
+        { id: 't4v6w1', model: 'Fable 5.0',    file: 'games/ultrakill-clone/t4v6w1.html' },
       ],
     },
   ],
