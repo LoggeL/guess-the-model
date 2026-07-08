@@ -173,6 +173,14 @@
     return Array.from(new Set([...roster, ...used]));
   }
 
+  // Distinct models actually competing in a given challenge (the visible lineup).
+  function challengeModels(challenge) {
+    return Array.from(new Set(challenge.entries.map(e => e.model)));
+  }
+  function modelChips(models) {
+    return el('div.model-chips', models.map(m => el('span.model-chip', m)));
+  }
+
   function computeReveal(challenge, order, guesses, ratings) {
     let score = 0;
     const rows = order.map((eid, i) => {
@@ -283,6 +291,9 @@
       el('h3.case-title', c.title),
       el('p.case-tag', c.tagline || ''),
       el('div.case-prompt', el('span.case-prompt-mark', '$'), c.prompt),
+      el('div.case-models',
+        el('span.case-models-label', 'In the lineup'),
+        modelChips(challengeModels(c))),
       el('div.case-foot', pips, el('span.case-count', `${n} sealed`)),
       actions);
   }
@@ -298,7 +309,12 @@
       ? reviveSession(challenge, saved)
       : newSession(challenge);
 
-    const steps = subbarSteps();
+    const steps = subbarSteps((key) => {
+      // let the header steps jump between Play and Call it as a shortcut
+      if (session.phase !== 'play' && session.phase !== 'guess') return;
+      if (key === 'play' && session.phase !== 'play') ctrl.goPhase('play');
+      else if (key === 'guess' && session.phase !== 'guess') ctrl.goPhase('guess');
+    });
     const phaseSlot = el('main.session.wrap');
     const subbar = el('div.subbar',
       el('div.wrap.subbar-inner',
@@ -354,7 +370,7 @@
     save(s);
   }
 
-  function subbarSteps() {
+  function subbarSteps(onStep) {
     const items = [
       { key: 'play', n: '1', label: 'Play' },
       { key: 'guess', n: '2', label: 'Call it' },
@@ -363,7 +379,10 @@
     const nodes = {};
     const wrap = el('div.subbar-steps',
       items.map((it, i) => {
-        const step = el('span.step', el('i', it.n), it.label);
+        const clickable = onStep && it.key !== 'reveal';
+        const step = el('span.step' + (clickable ? '.step-nav' : ''),
+          { onClick: clickable ? () => onStep(it.key) : undefined },
+          el('i', it.n), it.label);
         nodes[it.key] = step;
         return [step, i < items.length - 1 ? el('span.step-sep', '/') : null];
       }));
@@ -405,11 +424,14 @@
             el('span.brief-step-n', num),
             el('div.brief-step-h', h),
             el('div.brief-step-d', d)))),
+      el('div.brief-models',
+        el('div.brief-models-label', `The lineup · ${challengeModels(c).length} models`),
+        modelChips(challengeModels(c))),
       el('div.brief-actions',
         el('button.btn.btn-accent.btn-lg', { onClick: () => ctrl.goPhase('play') }, 'Enter the lineup →'),
         result && el('button.btn.btn-quiet.btn-lg', { onClick: () => go('/c/' + c.id + '/result') },
           `Last verdict · ${result.score}/${result.total}`)),
-      el('p.brief-note', 'Models in the running: ', el('b', String(n)), ' · identities sealed until reveal'));
+      el('p.brief-note', 'You know who is in the room — not which build is theirs. Identities stay sealed until you call it.'));
   }
 
   // --------------------------------------------------------------------------
@@ -459,16 +481,15 @@
       rateLabel);
 
     const progress = el('span.play-progress');
-    const nextBtn = el('button.btn.btn-accent',
-      { onClick: () => (allRated() ? ctrl.goPhase('guess') : maybeGuess()) },
-      'Call it →');
+    const prevBtn = el('button.btn.btn-quiet', { onClick: () => setActive(s.active - 1) }, '← Prev');
+    const nextBtn = el('button.btn.btn-accent', { onClick: onNext });
 
     const root = el('div.play',
       tabs,
       stageWrap,
       el('div.play-foot',
         rateRow,
-        el('div.play-nav', progress, el('button.btn.btn-quiet', { onClick: () => ctrl.goPhase('brief') }, 'Briefing'), nextBtn)));
+        el('div.play-nav', progress, prevBtn, nextBtn)));
 
     // ---- in-place patch helpers (no rebuild) ----
     function activeEid() { return s.order[s.active]; }
@@ -499,9 +520,16 @@
     function renderProgress() {
       const rated = s.order.filter(id => s.ratings[id]).length;
       progress.textContent = `${rated}/${s.order.length} rated`;
-      nextBtn.textContent = allRated() ? 'Lock in your calls →' : 'Call it →';
     }
-    function allRated() { return s.order.every(id => s.ratings[id]); }
+    function isLast() { return s.active >= s.order.length - 1; }
+    function renderNav() {
+      prevBtn.disabled = s.active === 0;
+      nextBtn.textContent = isLast() ? 'Call it →' : `Next · Entry ${LETTERS[s.active + 1]} →`;
+    }
+    function onNext() {
+      if (isLast()) ctrl.goPhase('guess');
+      else setActive(s.active + 1);
+    }
 
     // ---- actions ----
     function setActive(i) {
@@ -510,7 +538,7 @@
       const entry = entryById(c, s.order[i]);
       frame.src = entry.file;                 // ONLY place the iframe reloads
       overlayChip.replaceChildren(el('b', LETTERS[i]), ` Entry ${LETTERS[i]} · identity sealed`);
-      renderTabs(); renderRating();
+      renderTabs(); renderRating(); renderNav();
       saveProgress(s);
     }
     function setRating(n) {
@@ -518,9 +546,6 @@
       s.ratings[eid] = (s.ratings[eid] === n) ? 0 : n;   // toggle off if same
       renderRating(); renderTabs(); renderProgress();     // patch only — no iframe touch
       saveProgress(s);
-    }
-    function maybeGuess() {
-      ctrl.goPhase('guess'); // rating optional
     }
 
     // initial paint (sets src once)
